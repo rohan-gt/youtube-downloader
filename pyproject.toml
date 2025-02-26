@@ -1,0 +1,23 @@
+[project]
+name = "youtube-downloader"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "rohan-gt", email = "rohangt1591@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "autopep8>=2.3.2",
+    "black>=25.1.0",
+    "pyarmor>=9.1.0",
+    "pyside6>=6.8.2.1",
+    "yt-dlp>=2025.2.19",
+]
+
+[project.scripts]
+youtube-downloader = "youtube_downloader:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
