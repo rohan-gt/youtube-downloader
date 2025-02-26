@@ -38,7 +38,7 @@ def download_videos(
     """Download videos from the provided URLs using yt-dlp.
 
     Args:
-        urls (list[str]): list of video URLs.
+        urls (list[str]): List of video URLs.
         download_folder (str): Folder where videos will be saved.
         quality (str): Video quality to download. Defaults to "best".
         progress_hook (Optional[Callable[[dict[str, Any]], None]]): Callback for progress updates.
@@ -66,31 +66,40 @@ def download_videos(
         for url in urls:
             try:
                 info_dict = ydl.extract_info(url, download=False)
-                video_title = info_dict.get("title", "video")
-                video_ext = info_dict.get("ext", "mp4")
-                video_path = os.path.join(download_folder, f"{video_title}.{video_ext}")
+                video_path = ydl.prepare_filename(info_dict)
+
+                # Check for partial files before checking for full files
+                partial_file_exists = any(
+                    file.startswith(os.path.basename(video_path)) and file.endswith(".part")
+                    for file in os.listdir(download_folder)
+                )
+
+                if partial_file_exists:
+                    if logger_callback:
+                        logger_callback(f"INFO: Resuming {url}, detected partial file.")
 
                 if os.path.exists(video_path):
-                    if not os.path.exists(video_path + ".part"):
-                        if logger_callback:
-                            logger_callback(f"INFO: Skipping {url}, already exists.")
-                        continue
-                    else:
-                        if logger_callback:
-                            logger_callback(f"INFO: Resuming {url}, detected partial file.")
+                    if logger_callback:
+                        logger_callback(f"INFO: Skipping {url}, already exists.")
+                    continue
 
-
-                ydl.download([url])
+                try:
+                    ydl.download([url])
+                    if logger_callback:
+                        logger_callback(f"INFO: Successfully downloaded {url}")
+                except Exception as e:
+                    if logger_callback:
+                        logger_callback(f"ERROR: Failed to download {url}: {e}")
             except Exception as e:
                 if "Download aborted by user." in str(e):
                     if logger_callback:
                         logger_callback("INFO: Download aborted by user.")
                     break
-
                 if logger_callback:
                     logger_callback(f"ERROR downloading {url}: {e}")
                 else:
                     print(f"Error downloading {url}: {e}")
+
 
 def fetch_section(
     section_url: str, logger_callback: Optional[Callable[[str], None]] = None
