@@ -3,8 +3,15 @@ from typing import Any, Callable, Optional
 
 from yt_dlp import YoutubeDL
 
+
+class DownloadAbortedError(Exception):
+    """Exception raised when a download is aborted by the user."""
+    pass
+
+
 class YTDLLogger:
     """Logger class for yt-dlp to handle logging messages."""
+
     def __init__(self, callback: Optional[Callable[[str], None]]) -> None:
         """Initialize the logger with an optional callback function."""
         self.callback = callback
@@ -28,6 +35,7 @@ class YTDLLogger:
         if self.callback is not None:
             self.callback("ERROR: " + msg)
 
+
 def download_videos(
     urls: list[str],
     download_folder: str,
@@ -42,7 +50,7 @@ def download_videos(
         download_folder (str): Folder where videos will be saved.
         quality (str): Video quality to download. Defaults to "best".
         progress_hook (Optional[Callable[[dict[str, Any]], None]]): Callback for progress updates.
-        logger_callback (Optional[Callable[[str], None]]): Callback for logging warnings/errors.
+        logger_callback (Optional[Callable[[str], None]]): Callback for logging messages.
     """
     if not os.path.exists(download_folder):
         os.makedirs(download_folder)
@@ -50,55 +58,52 @@ def download_videos(
     ydl_opts: dict[str, Any] = {
         "format": quality,
         "outtmpl": os.path.join(download_folder, "%(title)s.%(ext)s"),
-        "merge_output_format": "mp4",
+        "merge_output_format": "mkv",
         "noplaylist": True,
-        "writesubtitles": True,
-        "allsubtitles": True,
-        "embedsubtitles": True,
-        "quiet": True,
+        'writesubtitles': True,
+        'writethumbnail': True,
+        'postprocessors': [
+            {'key': 'FFmpegEmbedSubtitle'},
+            {'key': 'FFmpegMetadata'},
+            {'key': 'EmbedThumbnail'},
+        ],
+        "progress_hooks": [progress_hook] if progress_hook else [],
+        "logger": YTDLLogger(logger_callback) if logger_callback else None,
     }
-    if progress_hook:
-        ydl_opts["progress_hooks"] = [progress_hook]
-    if logger_callback:
-        ydl_opts["logger"] = YTDLLogger(logger_callback)
 
     with YoutubeDL(ydl_opts) as ydl:
         for url in urls:
+            title = url
             try:
+                if progress_hook and hasattr(progress_hook, "__self__") and progress_hook.__self__._is_aborted:
+                    ydl.params["logger"].info("Download aborted by user before starting.")
+                    raise DownloadAbortedError()
+
                 info_dict = ydl.extract_info(url, download=False)
+                title = info_dict.get("title", url)
                 video_path = ydl.prepare_filename(info_dict)
-
-                # Check for partial files before checking for full files
-                partial_file_exists = any(
-                    file.startswith(os.path.basename(video_path)) and file.endswith(".part")
-                    for file in os.listdir(download_folder)
-                )
-
-                if partial_file_exists:
-                    if logger_callback:
-                        logger_callback(f"INFO: Resuming {url}, detected partial file.")
+                basename = os.path.basename(video_path)
+                part_path = video_path + ".part"
 
                 if os.path.exists(video_path):
-                    if logger_callback:
-                        logger_callback(f"INFO: Skipping {url}, already exists.")
+                    ydl.params["logger"].info(f"Skipping '{title}', already exists.")
                     continue
 
-                try:
-                    ydl.download([url])
-                    if logger_callback:
-                        logger_callback(f"INFO: Successfully downloaded {url}")
-                except Exception as e:
-                    if logger_callback:
-                        logger_callback(f"ERROR: Failed to download {url}: {e}")
-            except Exception as e:
-                if "Download aborted by user." in str(e):
-                    if logger_callback:
-                        logger_callback("INFO: Download aborted by user.")
-                    break
+                if os.path.exists(part_path):
+                    ydl.params["logger"].info(f"Resuming '{title}'.")
+
+                ydl.download([url])
                 if logger_callback:
-                    logger_callback(f"ERROR downloading {url}: {e}")
+                    logger_callback(f"INFO: Successfully downloaded '{title}'")
+            except Exception as e:
+                if isinstance(e, DownloadAbortedError):
+                    ydl.params["logger"].info(f"Download of '{title}' aborted by user.")
+                    raise
+                msg = f"ERROR downloading '{title}': {str(e)}"
+                if logger_callback:
+                    logger_callback(msg)
                 else:
-                    print(f"Error downloading {url}: {e}")
+                    raise Exception(msg)
 
 
 def fetch_section(
@@ -128,6 +133,7 @@ def fetch_section(
         video_id = entry.get("id") or entry.get("url", "")
         entry["full_url"] = f"https://www.youtube.com/watch?v={video_id}"
     return entries
+
 
 def fetch_playlists(
     playlists_url: str, logger_callback: Optional[Callable[[str], None]] = None
@@ -168,6 +174,7 @@ def fetch_playlists(
         playlists_dict[playlist_title] = pl_entries
     return playlists_dict
 
+
 def fetch_channel_content(
     channel_url: str, logger_callback: Optional[Callable[[str], None]] = None
 ) -> dict[str, Any]:
@@ -177,7 +184,7 @@ def fetch_channel_content(
     podcasts, and playlists based on the provided channel URL.
 
     Args:
-        channel_url (str): The base URL of the channel (e.g., https://www.youtube.com/@stanfordonline).
+        channel_url (str): The base URL of the channel.
         logger_callback (Optional[Callable[[str], None]]): Logger callback for warnings.
 
     Returns:

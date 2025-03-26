@@ -26,7 +26,11 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
-from youtube_downloader.backend.downloader import download_videos, fetch_channel_content
+from youtube_downloader.backend.downloader import (
+    download_videos,
+    fetch_channel_content,
+    DownloadAbortedError
+)
 from youtube_downloader.utils.config import load_config, save_config
 
 
@@ -52,12 +56,10 @@ class DownloadWorker(QThread):
         self._is_aborted = False
 
     def run(self) -> None:
-        """Main worker function that runs on thread start."""
-
         def progress_hook(status: dict[str, Any]) -> None:
             self.progress_update.emit(status)
             if self._is_aborted:
-                raise Exception("Download aborted by user.")
+                raise DownloadAbortedError()
 
         try:
             download_videos(
@@ -65,10 +67,11 @@ class DownloadWorker(QThread):
                 self.download_folder,
                 quality=self.quality,
                 progress_hook=progress_hook,
-                logger_callback=lambda msg: self.log_message.emit(msg)
+                logger_callback=lambda msg: self.log_message.emit(msg),
             )
         except Exception as e:
-            self.log_message.emit(f"ERROR: {e}")
+            if not isinstance(e, DownloadAbortedError):
+                self.log_message.emit(f"ERROR: {str(e)}")
         finally:
             self.finished.emit()
 
@@ -208,11 +211,6 @@ class DownloadControlsWidget(QWidget):
             self.entry_folder.setText(folder)
 
     def start_download(self, urls: list[str]) -> None:
-        """Start downloading the provided URLs.
-
-        Args:
-            urls (list[str]): List of URLs to download.
-        """
         if not urls:
             return
 
@@ -232,9 +230,8 @@ class DownloadControlsWidget(QWidget):
 
         self.btn_download.setEnabled(False)
         self.btn_abort.setEnabled(True)
-        self.label_current.setText("Downloading...")
+        self.label_current.setText("Starting downloads...")  # Initial feedback
 
-        # Create and start worker thread
         self.worker = DownloadWorker(urls, self.download_folder, selected_quality)
         self.worker.progress_update.connect(self.update_progress)
         self.worker.log_message.connect(self.log_callback)
@@ -242,25 +239,26 @@ class DownloadControlsWidget(QWidget):
         self.worker.start()
 
     def abort_download(self) -> None:
-        """Abort the ongoing download."""
-        if hasattr(self, 'worker') and self.worker.isRunning():
+        if hasattr(self, "worker") and self.worker.isRunning():
             self.worker.abort()
+            self.worker.wait(5000)
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.log_callback("WARNING: Forced termination of download thread.")
             self.btn_abort.setEnabled(False)
-            self.label_current.setText("Aborting download...")
+            self.label_current.setText("Download aborted.")
 
     def update_progress(self, status: dict[str, Any]) -> None:
-        """Update progress UI based on download status.
-
-        Args:
-            status (dict[str, Any]): Status dictionary from the download process.
-        """
         if status.get("status") == "downloading":
             downloaded = status.get("downloaded_bytes", 0)
-            total = status.get("total_bytes", 1)
+            total = status.get("total_bytes", 1) or status.get("total_bytes_estimate", 1)
             if total > 0:
                 percent = int(downloaded / total * 100)
                 self.progress_bar.setValue(percent)
-            self.label_current.setText(f"Downloading: {status.get('filename', '')}")
+            filename = status.get("filename", "Unknown")
+            if status.get("resuming", False):  # Check if resuming (not native, see fix)
+                self.log_callback(f"INFO: Resuming '{filename}'")
+            self.label_current.setText(f"Downloading: {filename}")
         elif status.get("status") == "finished":
             self.label_current.setText(f"Finished: {status.get('filename', '')}")
             self.progress_bar.setValue(0)
@@ -270,6 +268,8 @@ class DownloadControlsWidget(QWidget):
         self.btn_download.setEnabled(True)
         self.btn_abort.setEnabled(False)
         self.label_current.setText("All downloads completed.")
+        if hasattr(self, "worker"):
+            del self.worker
 
 
 class BatchWidget(QWidget):
@@ -298,7 +298,9 @@ class BatchWidget(QWidget):
 
         # Connect the download and abort buttons
         self.download_controls.btn_download.clicked.connect(self.start_download)
-        self.download_controls.btn_abort.clicked.connect(self.download_controls.abort_download)
+        self.download_controls.btn_abort.clicked.connect(
+            self.download_controls.abort_download
+        )
 
         # Add widgets to layout
         layout.addWidget(label_urls)
@@ -365,7 +367,9 @@ class ChannelWidget(QWidget):
 
         # Connect the download and abort buttons
         self.download_controls.btn_download.clicked.connect(self.start_download)
-        self.download_controls.btn_abort.clicked.connect(self.download_controls.abort_download)
+        self.download_controls.btn_abort.clicked.connect(
+            self.download_controls.abort_download
+        )
 
         # Add widgets to layout
         layout.addLayout(channel_layout)
@@ -519,6 +523,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 600)
         self.init_ui()
 
+    def resource_path(self, relative_path):
+        """ Get absolute path to resource, works for dev and for PyInstaller """
+        if getattr(sys, 'frozen', False):
+            # The application is frozen
+            base_path = sys._MEIPASS
+        else:
+            # The application is not frozen
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+
     def init_ui(self) -> None:
         """Initialize the UI components."""
         # Create tab widget
@@ -542,9 +556,7 @@ class MainWindow(QMainWindow):
 
         # Try to set icon
         try:
-            icon_path = os.path.join(
-                "src", "youtube_downloader", "assets", "icons", "youtube.ico"
-            )
+            icon_path = self.resource_path(os.path.join("assets", "icons", "youtube.ico"))
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
         except Exception as e:

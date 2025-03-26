@@ -2,6 +2,7 @@ import json
 import os
 from typing import Any
 
+
 CONFIG_FILE: str = os.path.join(
     os.path.expanduser("~"), ".youtube_downloader_config.json"
 )
